@@ -1,142 +1,153 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ECG Dataset Loader compatible with DVAE/VRNN architecture
-Author: ChatGPT (adapted from DVAE-speech)
+Minimal ECG Dataset Loader for DVAE/VRNN
+Labels textuels -> classes entières automatiquement
 """
 
-import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 
 ###########################################################
-# 1) FONCTION PRINCIPALE POUR CRÉER LES DATALOADERS
+# 1) DATALOADER PRINCIPAL
 ###########################################################
 
 def build_dataloader(cfg):
 
-    # Lecture paramètres généraux
-    data_path = cfg.get('User', 'data_path')  # chemin vers ecg_fast_data.npz
+    data_path = cfg.get('User', 'data_path')
     batch_size = cfg.getint('DataFrame', 'batch_size')
     shuffle = cfg.getboolean('DataFrame', 'shuffle')
     num_workers = cfg.getint('DataFrame', 'num_workers')
-    sequence_len = cfg.getint('DataFrame', 'sequence_len')
+    seq_len = cfg.getint('DataFrame', 'sequence_len')
     use_random_seq = cfg.getboolean('DataFrame', 'use_random_seq')
 
-    # Chargement du fichier NPZ
+    # Chargement
     data = np.load(data_path, allow_pickle=True)
-    X = data["X_fast"].tolist()
-    Y = data["y_fast"].tolist()
-    META = data["meta_fast"].tolist()
-
-    assert len(X) == len(Y)
+    X = data["X_fast"]     # shape (N, 300)
+    Y = data["y_fast"]     # strings !
 
     N = len(X)
 
-    # Shuffle global si demandé
+    # Shuffle global
     if shuffle:
         perm = np.random.permutation(N)
-        X = [X[i] for i in perm]
-        Y = [Y[i] for i in perm]
-        META = [META[i] for i in perm]
+        X = X[perm]
+        Y = Y[perm]
 
-    # Split 70/30
+    # Split 70 / 30
     split = int(0.7 * N)
-    train_X, train_Y, train_META = X[:split], Y[:split], META[:split]
-    val_X, val_Y, val_META = X[split:], Y[split:], META[split:]
+    train_X, train_Y = X[:split], Y[:split]
+    val_X,   val_Y   = X[split:], Y[split:]
 
-    # Création dataset
+    # Création datasets
     if use_random_seq:
-        train_dataset = ECGDatasetRandom(train_X, train_Y, sequence_len)
-        val_dataset = ECGDatasetRandom(val_X, val_Y, sequence_len)
+        train_dataset = ECGDatasetRandom(train_X, train_Y, seq_len)
+        val_dataset   = ECGDatasetRandom(val_X, val_Y, seq_len)
     else:
-        train_dataset = ECGDatasetFull(train_X, train_Y, sequence_len)
-        val_dataset = ECGDatasetFull(val_X, val_Y, sequence_len)
-
-    # Nombre d'échantillons utilisables
-    train_num = len(train_dataset)
-    val_num = len(val_dataset)
+        train_dataset = ECGDatasetFull(train_X, train_Y, seq_len)
+        val_dataset   = ECGDatasetFull(val_X, val_Y, seq_len)
 
     # Dataloaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
                               shuffle=shuffle, num_workers=num_workers)
+
     val_loader = DataLoader(val_dataset, batch_size=batch_size,
                             shuffle=shuffle, num_workers=num_workers)
 
-    return train_loader, val_loader, train_num, val_num
+    return train_loader, val_loader, len(train_dataset), len(val_dataset)
 
 
 
 ###########################################################
-# 2) VERSION FULL : découpe déterministe de l'ensemble ECG
+# Utility : map texte -> entier
+###########################################################
+
+def build_label_map(Y):
+    class2id = {}
+    next_id = 0
+    for y in Y:
+        if y not in class2id:
+            class2id[y] = next_id
+            next_id += 1
+    return class2id
+
+
+
+###########################################################
+# 2) Dataset Full
 ###########################################################
 
 class ECGDatasetFull(Dataset):
 
-    def __init__(self, X_list, Y_list, seq_len):
-        """
-        Découpe toutes les séries ECG en segments non superposés
-        """
+    def __init__(self, X, Y, seq_len):
         self.seq_len = seq_len
+
+        # mapping texte -> entier
+        self.class2id = build_label_map(Y)
+
         self.data = []
         self.labels = []
 
-        for x, y in zip(X_list, Y_list):
-            x = np.array(x)
+        for x, y in zip(X, Y):
+            x = x.astype(np.float32)
 
             # normalisation
-            if np.max(np.abs(x)) > 0:
-                x = x / np.max(np.abs(x))
+            m = np.max(np.abs(x))
+            if m > 0:
+                x = x / m
 
-            # segmenter en blocs de longueur seq_len
-            n_segments = len(x) // seq_len
+            # segmentation
+            n = len(x) // seq_len
+            for i in range(n):
+                seg = x[i*seq_len:(i+1)*seq_len]
+                seg = seg[:, None]  # (seq_len, 1)
 
-            for i in range(n_segments):
-                seg = x[i * seq_len : (i + 1) * seq_len]
-                self.data.append(seg.astype(np.float32))
-                self.labels.append(y)
+                self.data.append(seg)
+                self.labels.append(self.class2id[y])
 
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, index):
-        x = self.data[index]
-        y = self.labels[index]
-        return torch.tensor(x).float(), torch.tensor(y).long()
+    def __getitem__(self, idx):
+        return torch.tensor(self.data[idx]).float(), torch.tensor(self.labels[idx]).long()
 
 
 
 ###########################################################
-# 3) VERSION RANDOM : extrait un segment aléatoire à chaque appel
+# 3) Dataset Random
 ###########################################################
 
 class ECGDatasetRandom(Dataset):
 
-    def __init__(self, X_list, Y_list, seq_len):
+    def __init__(self, X, Y, seq_len):
+        self.X = X
+        self.Y = Y
         self.seq_len = seq_len
-        self.X = X_list
-        self.Y = Y_list
+
+        # mapping texte -> entier
+        self.class2id = build_label_map(Y)
 
     def __len__(self):
         return len(self.X)
 
-    def __getitem__(self, index):
-        x = np.array(self.X[index])
-        y = self.Y[index]
+    def __getitem__(self, idx):
+        x = self.X[idx].astype(np.float32)
+        y = self.Y[idx]
 
         # normalisation
-        if np.max(np.abs(x)) > 0:
-            x = x / np.max(np.abs(x))
+        m = np.max(np.abs(x))
+        if m > 0:
+            x = x / m
 
-        # tirer un segment random si série assez longue
+        # tirage aléatoire
         if len(x) > self.seq_len:
             start = np.random.randint(0, len(x) - self.seq_len)
-            x = x[start:start + self.seq_len]
+            x = x[start:start+self.seq_len]
         else:
-            # pad si trop court
-            pad = self.seq_len - len(x)
-            x = np.pad(x, (0, pad))
+            x = np.pad(x, (0, self.seq_len - len(x)))
 
-        return torch.tensor(x).float(), torch.tensor(y).long()
+        x = x[:, None]  # (seq_len,1)
+
+        return torch.tensor(x).float(), torch.tensor(self.class2id[y]).long()

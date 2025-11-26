@@ -199,7 +199,7 @@ class LearningAlgorithm():
 
         # Train with mini-batch SGD
         for epoch in range(start_epoch+1, epochs):
-            
+
             start_time = datetime.datetime.now()
 
             # KL warm-up
@@ -210,7 +210,12 @@ class LearningAlgorithm():
 
             # Batch training
             for _, batch_data in enumerate(train_dataloader):
-                batch_data = batch_data.to(self.device)
+                if self.dataset_name == 'ECG':
+                    batch_data, _ = batch_data          # (x_batch, y_batch)
+                else:
+                    # pour WSJ0 ou H36M → rien ne change
+                    pass
+
                 
                 if self.dataset_name == 'WSJ0':
                     # (batch_size, x_dim, seq_len) -> (seq_len, batch_size, x_dim)
@@ -223,14 +228,11 @@ class LearningAlgorithm():
                     recon_batch_data = self.model(batch_data)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
                 elif self.dataset_name == 'ECG':
-                    # batch_data = (batch, seq_len, 1)
-                    batch_data = batch_data.to(self.device)
-                    # (batch, seq, 1) -> (seq, batch, 1)
+                    batch_data = batch_data.to(self.device) # x seulement
                     batch_data = batch_data.permute(1, 0, 2)
-                    # reconstruction
                     recon_batch_data = self.model(batch_data)
-                    # MSE simple
-                    loss_recon = ((recon_batch_data - batch_data) ** 2).sum()
+                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
+
                     
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)
@@ -255,7 +257,12 @@ class LearningAlgorithm():
             # Validation
             for _, batch_data in enumerate(val_dataloader):
 
-                batch_data = batch_data.to(self.device)
+                if self.dataset_name == 'ECG':
+                    batch_data, _ = batch_data          # (x_batch, y_batch)
+                else:
+                    # pour WSJ0 ou H36M → rien ne change
+                    pass
+
 
                 if self.dataset_name == 'WSJ0':
                     # (batch_size, x_dim, seq_len) -> (seq_len, batch_size, x_dim)
@@ -268,14 +275,10 @@ class LearningAlgorithm():
                     recon_batch_data = self.model(batch_data)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
                 elif self.dataset_name == 'ECG':
-                    # batch_data = (batch, seq_len, 1)
-                    batch_data = batch_data.to(self.device)
-                    # (batch, seq, 1) -> (seq, batch, 1)
+                    batch_data = batch_data.to(self.device) # x seulement
                     batch_data = batch_data.permute(1, 0, 2)
-                    # reconstruction
                     recon_batch_data = self.model(batch_data)
-                    # MSE simple
-                    loss_recon = ((recon_batch_data - batch_data) ** 2).sum()
+                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
 
 
                 seq_len, bs, _ = self.model.z_mean.shape

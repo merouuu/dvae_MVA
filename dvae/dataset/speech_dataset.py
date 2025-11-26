@@ -35,8 +35,8 @@ def build_dataloader(cfg):
     fs = cfg.getint('STFT', 'fs')
     zp_percent = cfg.getint('STFT', 'zp_percent')
     wlen = wlen_sec * fs
-    wlen = np.int(np.power(2, np.ceil(np.log2(wlen)))) # pwoer of 2
-    hop = np.int(hop_percent * wlen)
+    wlen = int(np.power(2, np.ceil(np.log2(wlen)))) # pwoer of 2
+    hop = int(hop_percent * wlen)
     nfft = wlen + zp_percent * wlen
     win = torch.sin(torch.arange(0.5, wlen+0.5) / wlen * np.pi)
     trim = cfg.getboolean('STFT', 'trim')

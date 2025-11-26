@@ -8,7 +8,14 @@ License agreement in LICENSE.txt
 
 import numpy as np
 import soundfile as sf
-from pypesq import pesq
+try:
+    from pypesq import pesq   # audio only
+except:
+    try:
+        from pesq import pesq  # alternative library
+    except:
+        pesq = None            # disable PESQ completely
+
 from pystoi import stoi
 
 
