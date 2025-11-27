@@ -17,7 +17,8 @@ def load_train_val_sequences(cfg_path):
     cfg = myconf()
     cfg.read(cfg_path)
 
-    data_path = cfg.get("User", "data_path")
+    #data_path = cfg.get("User", "data_path")
+    data_path = r"C:\code\dvae_final\DVAE\data\ecg_fast_data.npz"
     seq_len   = cfg.getint("DataFrame", "sequence_len")
     shuffle   = cfg.getboolean("DataFrame", "shuffle")
     seed      = cfg.getint("DataFrame", "seed", fallback=0)
@@ -73,6 +74,79 @@ def plot_reconstruction(x, y):
     plt.xlabel("Time")
     plt.ylabel("Amplitude")
     plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_continuation(x, y_resynth, y_gen, split=300):
+    """
+    x         : original input (seq_len, 1, 1)
+    y_resynth : analysis-resynthesis output (seq_len, 1, 1)
+    y_gen     : generated continuation (gen_len, 1, 1)
+    split     : index where free generation begins
+    """
+
+    # Convert to numpy
+    x_np = x.squeeze().cpu().numpy()               # (300,)
+    y_resynth_np = y_resynth.squeeze().cpu().numpy()
+    y_gen_np = y_gen.squeeze().cpu().numpy()
+
+    # Concatenate reconstruction + continuation
+    y_full = np.concatenate([y_resynth_np[:split], y_gen_np], axis=0)
+
+    plt.figure(figsize=(12,4))
+    plt.plot(x_np, label="Original (input)", linewidth=2)
+    plt.plot(y_full, label="Reconstruction + Continuation", linewidth=2, alpha=0.8)
+
+    # Vertical red line
+    plt.axvline(split, color='red', linestyle='--', linewidth=2,
+                label=f"Switch to free generation @ {split}")
+
+    plt.title("VRNN Continuation Generation")
+    plt.xlabel("Time step")
+    plt.ylabel("Amplitude")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_continuation_ss(x, y_resynth, y_gen, split=300):
+    """
+    For VRNN_ss:
+    x         : (seq_len, 1, 1)
+    y_resynth : VRNN_ss reconstruction (seq_len, 1, 1)
+    y_gen     : continuation (gen_len, 1, 1)
+    split     : time index where continuation starts
+    """
+
+    # Convert tensors → numpy
+    x_np = x.squeeze().cpu().numpy()           # (seq_len,)
+    y_resynth_np = y_resynth.squeeze().cpu().numpy()
+    y_gen_np = y_gen.squeeze().cpu().numpy()   # (gen_len,)
+
+    # Combine reconstruction + generation
+    y_full = np.concatenate([y_resynth_np[:split], y_gen_np], axis=0)
+
+    plt.figure(figsize=(14, 4))
+    
+    # Plot original and reconstructed+continued signal
+    plt.plot(x_np, label="Original (input)", linewidth=2)
+    plt.plot(y_full, label="VRNN_ss reconstruction + continuation",
+             linewidth=2, alpha=0.8)
+
+    # Red vertical line
+    plt.axvline(
+        x=split,
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label=f"Start of free generation (t={split})"
+    )
+
+    plt.title("VRNN_ss Continuation Generation")
+    plt.xlabel("Time step")
+    plt.ylabel("Amplitude")
+    plt.legend()
+    plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()
 
@@ -251,3 +325,400 @@ def plot_mean_hidden_states(model, X, device, max_samples=64):
     plt.show()
 
     return H_mean, Z_mean
+
+
+def plot_mean_hidden_states(model, X, device, max_samples=64):
+    """
+    Compute and plot the AVERAGE hidden h(t) over many samples.
+    
+    X : numpy array of shape (N, 300)
+    max_samples : how many samples to average over
+    """
+
+    # pick min(N, max_samples)
+    N = min(len(X), max_samples)
+
+    print(f"Processing {N} samples...")
+
+    # Use lists to accumulate
+    h_list = []
+    zmu_list = []
+
+    model.eval()
+
+    for i in range(N):
+        x = X[i]
+        x = torch.tensor(x).float().unsqueeze(1).unsqueeze(1).to(device)  # (300,1,1)
+
+        with torch.no_grad():
+            _ = model(x)  # forward pass
+
+        # Retrieve tensors
+        h = model.h.squeeze(1).cpu().numpy()            # (300, dim_RNN)
+        zmu = model.z_mean.squeeze(1).cpu().numpy()     # (300, z_dim)
+
+        h_list.append(h)
+        zmu_list.append(zmu)
+
+    # Convert to arrays: shape (N, 300, dim_RNN)
+    H = np.stack(h_list)       # (N, 300, dim_RNN)
+    Z = np.stack(zmu_list)     # (N, 300, z_dim)
+
+    # Compute MEAN
+    H_mean = H.mean(axis=0).T   # → (dim_RNN, time)
+    Z_mean = Z.mean(axis=0).T   # → (z_dim, time)
+
+    print("Shapes:")
+    print("  H_mean:", H_mean.shape)
+    print("  Z_mean:", Z_mean.shape)
+
+    # ---------- Plot MEAN h(t) ----------
+    plt.figure(figsize=(12,5))
+    plt.imshow(H_mean, aspect='auto', cmap='viridis')
+    plt.colorbar(label="Mean hidden state value")
+    plt.xlabel("Time")
+    plt.ylabel("Hidden dimension")
+    plt.title(f"Mean LSTM hidden trajectories over {N} samples")
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- Plot MEAN z_mean(t) ----------
+    plt.figure(figsize=(12,5))
+    plt.imshow(Z_mean, aspect='auto', cmap='viridis')
+    plt.colorbar(label="Mean z_mu value")
+    plt.xlabel("Time")
+    plt.ylabel("Latent dimension")
+    plt.title(f"Mean latent μ(t) over {N} samples")
+    plt.tight_layout()
+    plt.show()
+
+    return H_mean, Z_mean
+
+
+def continue_generation_vrnn(model, split, total_len):
+    """
+    model: trained VRNN after running forward(x)
+    split: index where free generation begins
+    total_len: final desired length (>= split)
+    """
+
+    device = model.device
+    batch = 1
+
+    # ===== Retrieve last known state from analysis-resynthesis =====
+    # h_history = (seq_len, batch, dim_RNN)
+    h_full = model.h                     # stored automatically in forward()
+    h_t_last = h_full[split-1].unsqueeze(0)  # shape (1, batch, dim_RNN)
+
+    # Need full LSTM hidden state (num_layers, batch, dim_RNN)
+    h_t = h_t_last.repeat(model.num_RNN, 1, 1)
+    c_t = torch.zeros_like(h_t)
+
+    # Previous output (we use the reconstructed one)
+    y_prev = model.z[split-1].unsqueeze(0)   # WRONG: z is latent
+    # use the reconstructed audio instead:
+    y_prev = model.z_mean_p.new_zeros(1, batch, model.x_dim)
+
+    # Or simpler: start with model output at last inference time
+    # y_prev = model_tf(x)[split-1].unsqueeze(0)
+
+    # Prepare output tensor
+    y_gen = torch.zeros(total_len - split, batch, model.x_dim, device=device)
+
+    # =============================================================
+    #                  FREE GENERATION LOOP
+    # =============================================================
+    for t in range(total_len - split):
+
+        # 1) Prior: sample z_t ~ p(z | h)
+        mu_p, logvar_p = model.generation_z(h_t[-1].unsqueeze(0))
+        z_t = model.reparameterization(mu_p, logvar_p)  # (1,1,z_dim)
+
+        # 2) Decode x_t = p(x | z, h)
+        feat_z = model.feature_extractor_z(z_t)
+        y_t = model.generation_x(feat_z, h_t[-1].unsqueeze(0))  # (1,1,x_dim)
+
+        y_gen[t] = y_t
+
+        # 3) Update RNN using generated x_t
+        feat_x = model.feature_extractor_x(y_t)
+        h_t, c_t = model.recurrence(feat_x, feat_z, h_t, c_t)
+
+    return y_gen
+
+
+
+
+
+###################### SS VRNN model #########################
+
+import os, sys
+import numpy as np
+import matplotlib.pyplot as plt
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Device =", device)
+
+# ============================================================
+#  DENSE BLOCK
+# ============================================================
+
+class Dense_Block(nn.Module):
+    def __init__(self, in_dim, dense_list, activation='tanh'):
+        super().__init__()
+
+        act = nn.Tanh() if activation == 'tanh' else nn.ReLU()
+
+        layers = []
+        dim = in_dim
+        for h in dense_list:
+            layers.append(nn.Linear(dim, h))
+            layers.append(act)
+            dim = h
+
+        self.block = nn.Sequential(*layers)
+        self.out_dim = dim
+
+    def forward(self, x):
+        return self.block(x)
+
+# ============================================================
+#  VRNN (version patchée schedule sampling)
+# ============================================================
+
+class VRNN_ss(nn.Module):
+    def __init__(
+        self,
+        x_dim=1,
+        z_dim=32,
+        activation='tanh',
+        dense_x=[128, 128],
+        dense_z=[128, 128],
+        dense_hx_z=[128, 128],
+        dense_hz_x=[128, 128],
+        dense_h_z=[128, 128],
+        dim_RNN=128,
+        num_RNN=1,
+        dropout_p=0.0,
+        beta=1.0,
+        device="cuda"
+    ):
+        super().__init__()
+
+        self.x_dim = x_dim
+        self.z_dim = z_dim
+        self.beta = beta
+        self.device = device
+
+        # schedule sampling : probabilité de teacher forcing
+        self.ss_prob = 1.0
+
+        self.feature_extractor_x = Dense_Block(x_dim, dense_x, activation)
+        self.feature_extractor_z = Dense_Block(z_dim, dense_z, activation)
+
+        # inference q(z|x,h)
+        self.inference_xh_to_z = Dense_Block(
+            self.feature_extractor_x.out_dim + dim_RNN,
+            dense_hx_z,
+            activation
+        )
+        self.inference_mean = nn.Linear(self.inference_xh_to_z.out_dim, z_dim)
+        self.inference_logvar = nn.Linear(self.inference_xh_to_z.out_dim, z_dim)
+
+        # prior p(z|h)
+        self.prior_h_to_z = Dense_Block(dim_RNN, dense_h_z, activation)
+        self.prior_mean = nn.Linear(self.prior_h_to_z.out_dim, z_dim)
+        self.prior_logvar = nn.Linear(self.prior_h_to_z.out_dim, z_dim)
+
+        # decoder p(x|z,h)
+        self.generator_hz_to_x = Dense_Block(
+            self.feature_extractor_z.out_dim + dim_RNN,
+            dense_hz_x,
+            activation
+        )
+        self.generator_mean = nn.Linear(self.generator_hz_to_x.out_dim, x_dim)
+
+        self.dim_RNN = dim_RNN
+        self.num_RNN = num_RNN
+        self.rnn = nn.LSTM(
+            self.feature_extractor_x.out_dim + self.feature_extractor_z.out_dim,
+            dim_RNN,
+            num_layers=num_RNN,
+            dropout=dropout_p,
+            batch_first=False
+        )
+
+        self.to(device)
+
+    def reparameterization(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+        
+
+    def inference_z(self, fx, h_prev):
+        hx = torch.cat([fx, h_prev], dim=-1)
+        hidden = self.inference_xh_to_z(hx)
+        mu = self.inference_mean(hidden)
+        logvar = self.inference_logvar(hidden)
+        return mu, logvar
+
+    def generation_z(self, h_prev):
+        hidden = self.prior_h_to_z(h_prev)
+        mu = self.prior_mean(hidden)
+        logvar = self.prior_logvar(hidden)
+        return mu, logvar
+
+    def generation_x(self, fz, h_prev):
+        hz = torch.cat([fz, h_prev], dim=-1)
+        hidden = self.generator_hz_to_x(hz)
+        return self.generator_mean(hidden)
+
+    def forward(self, x, training=True):
+        T, B, _ = x.size()
+        h_t = torch.zeros(self.num_RNN, B, self.dim_RNN, device=self.device)
+        c_t = torch.zeros(self.num_RNN, B, self.dim_RNN, device=self.device)
+
+        h_list = []
+        recon_list = []
+        z_list = []
+        mu_q_list = []
+        logvar_q_list = []
+        mu_p_list = []
+        logvar_p_list = []
+
+        y_prev = None
+
+        for t in range(T):
+            x_t = x[t]
+
+            # =============== Schedule Sampling ==================
+            if training and t > 0 and self.ss_prob < 1.0:
+                if torch.rand(1, device=x.device).item() > self.ss_prob:
+                    if y_prev is not None:
+                        x_t = y_prev.detach()
+
+            fx = self.feature_extractor_x(x_t)
+            h_prev = h_t[-1]
+
+            mu_q, logvar_q = self.inference_z(fx, h_prev)
+            z_t = self.reparameterization(mu_q, logvar_q)
+            fz = self.feature_extractor_z(z_t)
+
+            mu_p, logvar_p = self.generation_z(h_prev)
+
+            y_t = self.generation_x(fz, h_prev)
+            y_prev = y_t
+
+            rnn_in = torch.cat([fx, fz], dim=-1).unsqueeze(0)
+            _, (h_t, c_t) = self.rnn(rnn_in, (h_t, c_t))
+            h_list.append(h_t[-1].clone())
+
+
+            recon_list.append(y_t)
+            z_list.append(z_t)
+            mu_q_list.append(mu_q)
+            logvar_q_list.append(logvar_q)
+            mu_p_list.append(mu_p)
+            logvar_p_list.append(logvar_p)
+
+        recon = torch.stack(recon_list)
+        z = torch.stack(z_list)
+        mu_q = torch.stack(mu_q_list)
+        logvar_q = torch.stack(logvar_q_list)
+        mu_p = torch.stack(mu_p_list)
+        logvar_p = torch.stack(logvar_p_list)
+
+        # ----- store internal states for continuation -----
+        self.h = torch.stack(h_list)          # (T, B, dim_RNN)
+        self.z = z                            # <----- ADDED
+        self.z_mean = mu_q
+        self.z_logvar = logvar_q
+        self.z_mean_p = mu_p
+        self.z_logvar_p = logvar_p
+
+        return recon, z, mu_q, logvar_q, mu_p, logvar_p
+
+
+    def encode(self, x):
+        """
+        Utilisé pour forecasting.
+        """
+        y, z, mu_q, logvar_q, _, _ = self.forward(x, training=False)
+        return z, mu_q, logvar_q
+    
+
+    
+def generate_from_context(model, context_seq, pred_steps=300, device="cuda", stochastic=True):
+    """
+    Génère une séquence ECG en partant d'un contexte donné.
+    Utilise:
+       - encode(x_1:T) -> z_1:T
+       - replay z dans le RNN pour obtenir h_T
+       - génération future avec p(z|h)
+    """
+    model.eval()
+
+    # Convertir le contexte en tenseur VRNN (T,1,1)
+    x = torch.tensor(context_seq, dtype=torch.float32, device=device)
+    x = x.unsqueeze(1).unsqueeze(-1)  # (T,1,1)
+    T = x.size(0)
+
+    with torch.no_grad():
+
+        # ===== 1) Encoder le contexte : z_1:T =====
+        z_hist, mu_hist, logvar_hist = model.encode(x)   # (T,1,z_dim)
+
+        # ===== 2) Rejouer le contexte dans le RNN =====
+        num_layers, B, h_dim = model.num_RNN, 1, model.dim_RNN
+        h_t = torch.zeros(num_layers, B, h_dim, device=device)
+        c_t = torch.zeros(num_layers, B, h_dim, device=device)
+
+        fx_hist = model.feature_extractor_x(x)        # (T,1,dim_fx)
+        fz_hist = model.feature_extractor_z(z_hist)   # (T,1,dim_fz)
+
+        for t in range(T):
+            # fx_hist[t] : (1, dim_fx), fz_hist[t] : (1, dim_fz)
+            rnn_input = torch.cat([fx_hist[t], fz_hist[t]], dim=-1).unsqueeze(0)  # (1,1,dim_total)
+            _, (h_t, c_t) = model.rnn(rnn_input, (h_t, c_t))
+
+        # Dernier point du contexte comme point de départ
+        x_t = x[-1]   # (1,1)
+
+        # ===== 3) Génération future =====
+        generated = []
+
+        for _ in range(pred_steps):
+
+            # φ_x(x_t)  -> (1, dim_fx)
+            fx = model.feature_extractor_x(x_t)
+
+            # dernier état h_{t-1} : garder la même forme que dans forward, donc 2D (B, dim_h)
+            h_prev = h_t[-1]                  # (1, h_dim)  <-- plus de unsqueeze(0) ici
+
+            # prior p(z|h)  -> (1, z_dim)
+            mu_p, logvar_p = model.generation_z(h_prev)
+            z_t = model.reparameterization(mu_p, logvar_p) if stochastic else mu_p
+
+            # φ_z(z_t) -> (1, dim_fz)
+            fz = model.feature_extractor_z(z_t)
+
+            # p(x|z,h) -> (1, x_dim)
+            y_t = model.generation_x(fz, h_prev)     # (1,1) si x_dim=1
+
+            # extraire la valeur scalaire
+            generated.append(y_t.item())
+
+            # update RNN : concaténer deux tenseurs 2D -> 2D, puis unsqueeze(0) pour la dimension temporelle
+            rnn_input = torch.cat([fx, fz], dim=-1).unsqueeze(0)  # (1,1,dim_total)
+            _, (h_t, c_t) = model.rnn(rnn_input, (h_t, c_t))
+
+            # autoregressif : x_t ← y_t (toujours (1,1))
+            x_t = y_t
+
+    return np.array(generated, dtype=np.float32)

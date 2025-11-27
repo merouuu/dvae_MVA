@@ -202,10 +202,13 @@ class LearningAlgorithm():
 
             start_time = datetime.datetime.now()
 
-            # KL warm-up
-            if epoch % 10 == 0 and kl_warm < 1:
-                kl_warm = (epoch // 10) * 0.2 
-                logger.info('KL warm-up, anneal coeff: {}'.format(kl_warm))
+            ## KL warm-up
+            #if epoch % 10 == 0 and kl_warm < 1:
+            #    kl_warm = (epoch // 10) * 0.2 
+            #    logger.info('KL warm-up, anneal coeff: {}'.format(kl_warm))
+
+            kl_warm = min(1.0, epoch / 5)
+            logger.info(f"KL warm-up coefficient = {kl_warm:.3f}")
 
 
             # Batch training
