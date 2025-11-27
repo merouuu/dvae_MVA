@@ -16,6 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 
 def build_dataloader(cfg):
 
+    seed = cfg.getint('DataFrame', 'seed')
+    np.random.seed(seed)
     data_path = cfg.get('User', 'data_path')
     batch_size = cfg.getint('DataFrame', 'batch_size')
     shuffle = cfg.getboolean('DataFrame', 'shuffle')
