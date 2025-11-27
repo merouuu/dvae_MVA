@@ -207,7 +207,7 @@ class LearningAlgorithm():
             #    kl_warm = (epoch // 10) * 0.2 
             #    logger.info('KL warm-up, anneal coeff: {}'.format(kl_warm))
 
-            kl_warm = min(1.0, epoch / 5)
+            kl_warm = min(1.0, epoch / 3)
             logger.info(f"KL warm-up coefficient = {kl_warm:.3f}")
 
 
