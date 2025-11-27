@@ -260,6 +260,7 @@ class VRNN(nn.Module):
             h[t,:,:] = torch.squeeze(h_t_last)
             h_t, c_t = self.recurrence(feature_xt, feature_zt, h_t, c_t) # recurrence for t+1 
         self.z_mean_p, self.z_logvar_p  = self.generation_z(h)
+        self.h = h                   # (seq_len, batch, dim_RNN)
         
         return y
 
