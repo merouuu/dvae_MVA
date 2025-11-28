@@ -238,8 +238,12 @@ class VRNN(nn.Module):
         self.z_logvar = torch.zeros((seq_len, batch_size, self.z_dim)).to(self.device)
         y = torch.zeros((seq_len, batch_size, self.y_dim)).to(self.device)
         self.z = torch.zeros((seq_len, batch_size, self.z_dim)).to(self.device)
-        h = torch.zeros((seq_len, batch_size, self.dim_RNN)).to(self.device)
-        z_t = torch.zeros(batch_size, self.z_dim).to(self.device)
+
+        # storage of hidden states
+        self.h = torch.zeros((seq_len, batch_size, self.dim_RNN)).to(self.device)
+        self.h_full = torch.zeros((seq_len, self.num_RNN, batch_size, self.dim_RNN),device=self.device)
+        self.c_full = torch.zeros((seq_len, self.num_RNN, batch_size, self.dim_RNN),device=self.device)
+
         h_t = torch.zeros(self.num_RNN, batch_size, self.dim_RNN).to(self.device)
         c_t = torch.zeros(self.num_RNN, batch_size, self.dim_RNN).to(self.device)
 
@@ -257,10 +261,12 @@ class VRNN(nn.Module):
             self.z_logvar[t,:,:] = logvar_zt
             self.z[t,:,:] = torch.squeeze(z_t)
             y[t,:,:] = y_t # x_dim = 1 pour nous
-            h[t,:,:] = torch.squeeze(h_t_last)
+            self.h[t,:,:] = torch.squeeze(h_t_last)
+            self.h_full[t] = h_t
+            self.c_full[t] = c_t
             h_t, c_t = self.recurrence(feature_xt, feature_zt, h_t, c_t) # recurrence for t+1 
-        self.z_mean_p, self.z_logvar_p  = self.generation_z(h)
-        self.h = h                   # (seq_len, batch, dim_RNN)
+
+        self.z_mean_p, self.z_logvar_p  = self.generation_z(self.h)
         
         return y
 

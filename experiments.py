@@ -396,55 +396,57 @@ def plot_mean_hidden_states(model, X, device, max_samples=64):
 
 
 def continue_generation_vrnn(model, split, total_len):
-    """
-    model: trained VRNN after running forward(x)
-    split: index where free generation begins
-    total_len: final desired length (>= split)
-    """
 
     device = model.device
     batch = 1
 
-    # ===== Retrieve last known state from analysis-resynthesis =====
-    # h_history = (seq_len, batch, dim_RNN)
-    h_full = model.h                     # stored automatically in forward()
-    h_t_last = h_full[split-1].unsqueeze(0)  # shape (1, batch, dim_RNN)
+    # ================================================================
+    # 1. Récupérer les VRAIS états à t = split-1
+    # ================================================================
+    
+    # hidden states (all layers)
+    h_t = model.h_full[split-1].clone()  # shape (num_layers, batch, dim_RNN)
+    c_t = model.c_full[split-1].clone()  # shape (num_layers, batch, dim_RNN)
 
-    # Need full LSTM hidden state (num_layers, batch, dim_RNN)
-    h_t = h_t_last.repeat(model.num_RNN, 1, 1)
-    c_t = torch.zeros_like(h_t)
+    # last-layer hidden state = used by prior + decoder
+    h_t_last = h_t[-1].unsqueeze(0)      # shape (1, batch, dim_RNN)
 
-    # Previous output (we use the reconstructed one)
-    y_prev = model.z[split-1].unsqueeze(0)   # WRONG: z is latent
-    # use the reconstructed audio instead:
-    y_prev = model.z_mean_p.new_zeros(1, batch, model.x_dim)
+    # On part d'un x_t initial = output reconstruit au split-1
+    # comme dans forward() où y[t] = model.generation_x(...)
+    y_prev = model.forward_output[split-1].unsqueeze(0) \
+             if hasattr(model, "forward_output") else None
 
-    # Or simpler: start with model output at last inference time
-    # y_prev = model_tf(x)[split-1].unsqueeze(0)
+    # Mais y_prev N'EST PAS utilisé directement : le VRNN génère x_t from scratch
+    # Ce var est inutile pour VRNN (contrairement à un ARNN)
+    
+    # Préparation du buffer de sortie
+    gen_len = total_len - split
+    y_gen = torch.zeros(gen_len, batch, model.x_dim, device=device)
 
-    # Prepare output tensor
-    y_gen = torch.zeros(total_len - split, batch, model.x_dim, device=device)
+    # ================================================================
+    # 2. GÉNÉRATION LIBRE EXACTE
+    # ================================================================
+    for t in range(gen_len):
 
-    # =============================================================
-    #                  FREE GENERATION LOOP
-    # =============================================================
-    for t in range(total_len - split):
+        # ---- 2.1 Prior : p(z_t | h_t_last)
+        mu_p, logvar_p = model.generation_z(h_t_last)
+        z_t = model.reparameterization(mu_p, logvar_p)  # (1, batch, z_dim)
 
-        # 1) Prior: sample z_t ~ p(z | h)
-        mu_p, logvar_p = model.generation_z(h_t[-1].unsqueeze(0))
-        z_t = model.reparameterization(mu_p, logvar_p)  # (1,1,z_dim)
-
-        # 2) Decode x_t = p(x | z, h)
+        # ---- 2.2 Decode : x_t = p(x | z_t, h_t_last)
         feat_z = model.feature_extractor_z(z_t)
-        y_t = model.generation_x(feat_z, h_t[-1].unsqueeze(0))  # (1,1,x_dim)
+        y_t = model.generation_x(feat_z, h_t_last)       # (1, batch, x_dim)
 
         y_gen[t] = y_t
 
-        # 3) Update RNN using generated x_t
+        # ---- 2.3 Mettre à jour RNN comme dans forward()
         feat_x = model.feature_extractor_x(y_t)
         h_t, c_t = model.recurrence(feat_x, feat_z, h_t, c_t)
 
+        # ---- 2.4 Actualiser h_t_last = dernier layer
+        h_t_last = h_t[-1].unsqueeze(0)
+
     return y_gen
+
 
 
 
