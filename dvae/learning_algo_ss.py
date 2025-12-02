@@ -234,13 +234,11 @@ class LearningAlgorithm_ss():
                 elif self.dataset_name == 'Bach':
                     # (Batch, Seq, Dim) -> (Seq, Batch, Dim)
                     batch_data = batch_data.permute(1, 0, 2)
-                    # MSE Loss for Music
-                    recon_batch_data = self.model(batch_data, use_pred)
-                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
 
-                    #recon_batch_data = self.model(batch_data, use_pred)
-                    # Attention : Pour la BCE, il faut que recon_batch_data soit entre 0 et 1 (d'où la Sigmoid plus haut)
-                    # reduction='sum' pour garder la même échelle que votre KLD
+                    # BCE Loss for Music
+                    batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    recon_batch_data = self.model(batch_data, use_pred)
+                    #loss_recon = ((recon_batch_data - batch_data)**2).sum()
                     loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
 
                 seq_len, bs, _ = self.model.z_mean.shape
@@ -281,7 +279,12 @@ class LearningAlgorithm_ss():
                 elif self.dataset_name == 'Bach':
                     batch_data = batch_data.permute(1, 0, 2)
                     recon_batch_data = self.model(batch_data, use_pred)
-                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                    batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    recon_batch_data = self.model(batch_data, use_pred)
+                    #loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                    loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
+
+                    
 
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)
