@@ -1,63 +1,168 @@
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
-from dvae.dataset.ecg_dataset import build_dataloader, ECGDatasetFull
 from dvae.dataset.music_dataset import MusicDataset
 from dvae.utils import myconf
+import pretty_midi
+import IPython.display as ipd
+from pretty_midi import PrettyMIDI
 
-def load_train_val_sequences(cfg_path):
+def load_train_val_sequences_music(cfg_path):
     """
-    Reconstruit EXACTEMENT X_train / X_val tels qu'utilisés pendant l'entraînement DVAE.
-    Reproduit :
-        - le shuffle global
-        - la division 70/30
-        - la segmentation en séquences
+    Reconstruit les tenseurs X_train / X_val pour la musique.
+    
+    Note : Comme le MusicDataset utilise du 'Random Crop', cette fonction
+    génère un 'snapshot' fixe (une séquence extraite par morceau).
+    Si vous relancez la fonction, les séquences changeront (sauf si seed fixée).
     """
-
-    # === Charger config.ini ===
+    
+    # === 1. Charger la config ===
+    # Assurez-vous d'avoir importé myconf ou définissez-le
+    
     cfg = myconf()
     cfg.read(cfg_path)
+    
+    data_path = r"C:\code\dvae_final\DVAE\data\bach_data.npz"
+    seq_len   = cfg.getint('DataFrame', 'sequence_len')
+    shuffle   = cfg.getboolean('DataFrame', 'shuffle')
+    seed      = cfg.getint('DataFrame', 'seed')
+    
+    # === 2. Charger les données Brutes (.npz) ===
+    # Le fichier contient un dictionnaire avec la clé 'data'
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Fichier introuvable : {data_path}")
 
-    #data_path = cfg.get("User", "data_path")
-    data_path = r"C:\code\dvae_final\DVAE\data\ecg_fast_data.npz"
-    seq_len   = cfg.getint("DataFrame", "sequence_len")
-    shuffle   = cfg.getboolean("DataFrame", "shuffle")
-    seed      = cfg.getint("DataFrame", "seed", fallback=0)
-
-    # === Charger les données ECG ===
-    data = np.load(data_path, allow_pickle=True)
-    X = data["X_fast"]
-    Y = data["y_fast"]
-
-    N = len(X)
-
-    # === Reproduire EXACTEMENT le shuffle global ===
+    raw_data = np.load(data_path, allow_pickle=True)['data']
+    N = len(raw_data)
+    
+    # === 3. Reproduire le Shuffle Global ===
+    # On fixe la seed pour que la séparation Train/Val soit toujours la même
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    # Attention : raw_data est un array d'objets (liste de matrices), 
+    # on doit le mélanger avec numpy
     if shuffle:
-        perm = np.random.permutation(N)
-        X = X[perm]
-        Y = Y[perm]
-
-    # === Split 70/30 identique au LearningAlgorithm ===
-    split = int(0.7 * N)
-    train_X, train_Y = X[:split], Y[:split]
-    val_X,   val_Y   = X[split:], Y[split:]
-
-    # === Reproduire EXACTEMENT la segmentation DVAE ===
-    train_set = ECGDatasetFull(train_X, train_Y, seq_len)
-    val_set   = ECGDatasetFull(val_X, val_Y, seq_len)
-
-    # === Construire les tensors finaux ===
-    X_train = torch.stack([train_set[i][0] for i in range(len(train_set))])
-    y_train = torch.tensor([train_set[i][1] for i in range(len(train_set))])
-
-    X_val = torch.stack([val_set[i][0] for i in range(len(val_set))])
-    y_val = torch.tensor([val_set[i][1] for i in range(len(val_set))])
-
+        np.random.shuffle(raw_data)
+        
+    # === 4. Split 80/20 (Comme dans build_music_dataloader) ===
+    split = int(0.8 * N)
+    train_data = raw_data[:split]
+    val_data   = raw_data[split:]
+    
+    # === 5. Instancier les Datasets ===
+    train_ds = MusicDataset(train_data, seq_len)
+    val_ds   = MusicDataset(val_data, seq_len)
+    
+    # === 6. Construire les Tensors Finaux ===
+    # On itère sur le dataset pour extraire une séquence (crop) pour chaque morceau.
+    # MusicDataset retourne (x, y) où y est dummy (0).
+    
+    print(f"Extraction des séquences musicales (Train: {len(train_ds)}, Val: {len(val_ds)})...")
+    
+    # On utilise torch.stack pour empiler les tenseurs individuels en un gros batch
+    # X_train aura la forme (N_train, seq_len, 88)
+    X_train = torch.stack([train_ds[i][0] for i in range(len(train_ds))])
+    y_train = torch.stack([train_ds[i][1] for i in range(len(train_ds))]) # Que des 0
+    
+    X_val = torch.stack([val_ds[i][0] for i in range(len(val_ds))])
+    y_val = torch.stack([val_ds[i][1] for i in range(len(val_ds))]) # Que des 0
+    
+    print(f"Terminé. X_train shape: {X_train.shape}")
+    
     return X_train, y_train, X_val, y_val
 
+def continue_generation_vrnn(model, split, total_len):
+    device = model.device
+    
+    # Attention : on détecte la taille du batch depuis les états cachés enregistrés
+    # model.h_full est de forme (Seq, Layers, Batch, Dim) ou (Seq, Batch, Dim) selon l'implémentation
+    # Ici on assume que le batch est dimension 1 dans h_full[t]
+    batch = model.h_full[0].shape[1] 
+
+    # --- 1. Récupérer les VRAIS états à t = split-1 ---
+    # Ces variables existent parce qu'on a lancé model(x_context) juste avant !
+    h_t = model.h_full[split-1].clone()  # shape (num_layers, batch, dim_RNN)
+    c_t = model.c_full[split-1].clone()  # shape (num_layers, batch, dim_RNN)
+
+    # last-layer hidden state
+    h_t_last = h_t[-1].unsqueeze(0)      # shape (1, batch, dim_RNN)
+
+    # Préparation du buffer de sortie
+    gen_len = total_len - split
+    
+    # x_dim est 88 pour la musique
+    y_gen = torch.zeros(gen_len, batch, model.x_dim, device=device)
+
+    # --- 2. GÉNÉRATION LIBRE EXACTE ---
+    for t in range(gen_len):
+        # 2.1 Prior : p(z_t | h_t_last)
+        mu_p, logvar_p = model.generation_z(h_t_last)
+        z_t = model.reparameterization(mu_p, logvar_p)
+
+        # 2.2 Decode : x_t = p(x | z_t, h_t_last)
+        feat_z = model.feature_extractor_z(z_t)
+        y_t = model.generation_x(feat_z, h_t_last)
+
+        y_gen[t] = y_t
+
+        # 2.3 Mettre à jour RNN
+        feat_x = model.feature_extractor_x(y_t) # C'est le fameux phi_x !
+        h_t, c_t = model.recurrence(feat_x, feat_z, h_t, c_t)
+
+        # 2.4 Actualiser h_t_last
+        h_t_last = h_t[-1].unsqueeze(0)
+
+    return y_gen
+
+def play_midi(midi_path):
+    """
+    Lit un fichier MIDI dans un Notebook Jupyter/Colab.
+    """
+    try:
+        # 1. Charger le MIDI
+        pm = pretty_midi.PrettyMIDI(midi_path)
+        
+        # 2. Synthétiser l'audio
+        # fs = Fréquence d'échantillonnage (44100Hz est standard pour l'audio)
+        # Essayer d'utiliser fluidsynth pour un vrai son de piano
+        try:
+            # Cherche un soundfont commun sur Linux/Colab
+            audio_data = pm.fluidsynth(fs=44100, sf2_path='/users/share/sounds/sf2/FluidR3_GM.sf2')
+            print("Synthesizer: FluidSynth (Piano réaliste)")
+        except:
+            # Fallback : ondes simples (bip-bip) si fluidsynth n'est pas installé
+            print("Synthesizer: Simple Sine Wave (Son basique)")
+            audio_data = pm.synthesize(fs=44100)
+
+        # 3. Créer le widget audio
+        return ipd.Audio(audio_data, rate=44100)
+        
+    except Exception as e:
+        print(f"Erreur de lecture : {e}")
+        return None
+
+def plot_piano_roll(piano_roll, title):
+    plt.figure(figsize=(10, 4))
+    # On transpose pour avoir le temps en X et les notes en Y
+    # aspect='auto' permet d'étirer l'image pour qu'elle soit lisible
+    plt.imshow(piano_roll.T, origin='lower', aspect='auto', cmap='magma', vmin=0, vmax=1)
+    plt.colorbar(label="Vélocité / Probabilité")
+    plt.xlabel("Temps (frames)")
+    plt.ylabel("Pitch (Notes MIDI)")
+    plt.title(title)
+    plt.show()
 
 
+# Fonction utilitaire pour lire le MIDI dans le notebook
+def play_midi_file(midi_file):
+    try:
+        pm = PrettyMIDI(midi_file)
+        # fs=16000 est suffisant pour une pré-écoute rapide
+        audio_data = pm.synthesize(fs=16000) 
+        return ipd.Audio(audio_data, rate=16000)
+    except Exception as e:
+        print(f"Erreur audio : {e}")
 
 def plot_reconstruction(x, y):
     """

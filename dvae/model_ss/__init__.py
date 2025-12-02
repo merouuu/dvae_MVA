@@ -2,3 +2,4 @@
 # -*- coding: utf-8 -*-
 
 from .srnn_ss import build_SRNN_ss
+from .vrnn_ss import build_VRNN_ss
