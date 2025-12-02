@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from .utils import myconf, get_logger, loss_ISD, loss_KLD, loss_MPJPE
+from torch.nn import functional as F
 
 # Imports for datasets (added music_dataset)
 from .dataset import h36m_dataset, speech_dataset, music_dataset
@@ -236,6 +237,11 @@ class LearningAlgorithm_ss():
                     # MSE Loss for Music
                     recon_batch_data = self.model(batch_data, use_pred)
                     loss_recon = ((recon_batch_data - batch_data)**2).sum()
+
+                    #recon_batch_data = self.model(batch_data, use_pred)
+                    # Attention : Pour la BCE, il faut que recon_batch_data soit entre 0 et 1 (d'où la Sigmoid plus haut)
+                    # reduction='sum' pour garder la même échelle que votre KLD
+                    loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
 
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)

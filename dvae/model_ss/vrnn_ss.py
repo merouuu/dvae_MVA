@@ -185,8 +185,8 @@ class VRNN_ss(nn.Module):
         dec_input = torch.cat((feature_zt, h_t), 2)
         dec_output = self.mlp_hz_x(dec_input)
         y_t = self.gen_out(dec_output)
-        return y_t
-
+        return torch.sigmoid(y_t) # <--- AJOUTEZ CECI
+    
     def generation_z(self, h):
         prior_output = self.mlp_h_z(h)
         mean_prior = self.prior_mean(prior_output)
@@ -247,9 +247,14 @@ class VRNN_ss(nn.Module):
                 # Schedule Sampling Logic
                 if self.training and torch.rand(1).item() < use_pred:
                     # Use previous prediction
-                    # Optional: Apply Hard Sampling (Thresholding) here if desired for cleaner music training
-                    # inp = (prev_y > 0.5).float() 
-                    inp = prev_y 
+                    
+                    # --- LA CORRECTION EST ICI ---
+                    # On ne réinjecte pas 'prev_y' (qui contient des floats comme 0.73)
+                    # On réinjecte une version binarisée (0.0 ou 1.0) simulée.
+                    # Cela stabilise énormément le RNN car il reste dans son domaine connu.
+                    
+                    inp = (prev_y > 0.5).float() # Hard Thresholding
+                    
                     feature_xt_rec = self.feature_extractor_x(inp)
                 else:
                     # Use Ground Truth
