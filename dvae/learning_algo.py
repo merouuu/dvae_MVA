@@ -8,7 +8,6 @@ Contact : xiaoyu.bie@inria.fr
 License agreement in LICENSE.txt
 """
 
-
 import os
 import shutil
 import socket
@@ -18,7 +17,9 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from .utils import myconf, get_logger, loss_ISD, loss_KLD, loss_MPJPE
-from .dataset import h36m_dataset, speech_dataset, ecg_dataset
+
+# AJOUT : Import du dataset musique
+from .dataset import h36m_dataset, speech_dataset, ecg_dataset, music_dataset 
 from .model import build_VAE, build_DKF, build_STORN, build_VRNN, build_SRNN, build_RVAE, build_DSAE
 
 
@@ -146,8 +147,13 @@ class LearningAlgorithm():
             train_dataloader, val_dataloader, train_num, val_num = h36m_dataset.build_dataloader(self.cfg)
         elif self.dataset_name == 'ECG':
             train_dataloader, val_dataloader, train_num, val_num = ecg_dataset.build_dataloader(self.cfg)
+        # AJOUT DU DATASET BACH
+        elif self.dataset_name == 'Bach':
+            train_dataloader, val_dataloader, train_num, val_num = music_dataset.build_music_dataloader(self.cfg)
         else:
-            logger.error('Unknown datset')
+            logger.error('Unknown dataset')
+            raise NotImplementedError("Dataset inconnu")
+            
         logger.info('Training samples: {}'.format(train_num))
         logger.info('Validation samples: {}'.format(val_num))
         
@@ -203,40 +209,44 @@ class LearningAlgorithm():
             start_time = datetime.datetime.now()
 
             ## KL warm-up
-            #if epoch % 10 == 0 and kl_warm < 1:
-            #    kl_warm = (epoch // 10) * 0.2 
-            #    logger.info('KL warm-up, anneal coeff: {}'.format(kl_warm))
-
-            kl_warm = min(1.0, epoch / 3)
-            logger.info(f"KL warm-up coefficient = {kl_warm:.3f}")
-
+            kl_warm = min(1.0, epoch / 10) # Un peu plus lent pour la musique (10 epochs)
+            # logger.info(f"KL warm-up coefficient = {kl_warm:.3f}")
 
             # Batch training
             for _, batch_data in enumerate(train_dataloader):
+                
+                # --- PRÉTRAITEMENT DES DONNÉES ---
                 if self.dataset_name == 'ECG':
                     batch_data, _ = batch_data          # (x_batch, y_batch)
-                else:
-                    # pour WSJ0 ou H36M → rien ne change
-                    pass
-
+                elif self.dataset_name == 'Bach':
+                    batch_data, _ = batch_data          # (x_batch, dummy_y)
                 
+                # --- CALCUL DE LA LOSS ---
                 if self.dataset_name == 'WSJ0':
-                    # (batch_size, x_dim, seq_len) -> (seq_len, batch_size, x_dim)
                     batch_data = batch_data.permute(2, 0, 1)
                     recon_batch_data = torch.exp(self.model(batch_data)) # output log-variance
                     loss_recon = loss_ISD(batch_data, recon_batch_data)
+                    
                 elif self.dataset_name == 'H36M':
-                    # (batch_size, seq_len, x_dim) -> (seq_len, batch_size, x_dim)
-                    batch_data = batch_data.permute(1, 0, 2) / 1000 # normalize to meters
+                    batch_data = batch_data.permute(1, 0, 2) / 1000 
                     recon_batch_data = self.model(batch_data)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
+                    
                 elif self.dataset_name == 'ECG':
-                    batch_data = batch_data.to(self.device) # x seulement
-                    batch_data = batch_data.permute(1, 0, 2)
+                    batch_data = batch_data.to(self.device)
+                    batch_data = batch_data.permute(1, 0, 2) # (Seq, Batch, Dim)
                     recon_batch_data = self.model(batch_data)
                     loss_recon = ((recon_batch_data - batch_data)**2).sum()
-
                     
+                elif self.dataset_name == 'Bach':
+                    # Musique : On traite comme l'ECG (MSE sur des valeurs continues 0-1)
+                    batch_data = batch_data.to(self.device)
+                    batch_data = batch_data.permute(1, 0, 2) # (Seq, Batch, 88)
+                    recon_batch_data = self.model(batch_data)
+                    # MSE Loss (Somme des carrés des erreurs)
+                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
+
+                # --- LOSS KL & BACKPROP ---
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)
 
@@ -246,11 +256,16 @@ class LearningAlgorithm():
                     loss_kl = loss_kl_z + loss_kl_v
                 else:
                     loss_kl = loss_KLD(self.model.z_mean, self.model.z_logvar, self.model.z_mean_p, self.model.z_logvar_p)
+                
                 loss_kl = kl_warm * beta * loss_kl / (seq_len * bs)
 
                 loss_tot = loss_recon + loss_kl
                 optimizer.zero_grad()
                 loss_tot.backward()
+                
+                # Gradient Clipping (Très utile pour la musique/RNN pour éviter l'explosion)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10)
+                
                 optimizer.step()
 
                 train_loss[epoch] += loss_tot.item() * bs
@@ -261,24 +276,25 @@ class LearningAlgorithm():
             for _, batch_data in enumerate(val_dataloader):
 
                 if self.dataset_name == 'ECG':
-                    batch_data, _ = batch_data          # (x_batch, y_batch)
-                else:
-                    # pour WSJ0 ou H36M → rien ne change
-                    pass
-
+                    batch_data, _ = batch_data         
+                elif self.dataset_name == 'Bach':
+                    batch_data, _ = batch_data  
 
                 if self.dataset_name == 'WSJ0':
-                    # (batch_size, x_dim, seq_len) -> (seq_len, batch_size, x_dim)
                     batch_data = batch_data.permute(2, 0, 1)
-                    recon_batch_data = torch.exp(self.model(batch_data)) # output log-variance
+                    recon_batch_data = torch.exp(self.model(batch_data)) 
                     loss_recon = loss_ISD(batch_data, recon_batch_data)
                 elif self.dataset_name == 'H36M':
-                    # (batch_size, seq_len, x_dim) -> (seq_len, batch_size, x_dim)
-                    batch_data = batch_data.permute(1, 0, 2) / 1000 # normalize to meters
+                    batch_data = batch_data.permute(1, 0, 2) / 1000 
                     recon_batch_data = self.model(batch_data)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
                 elif self.dataset_name == 'ECG':
-                    batch_data = batch_data.to(self.device) # x seulement
+                    batch_data = batch_data.to(self.device) 
+                    batch_data = batch_data.permute(1, 0, 2)
+                    recon_batch_data = self.model(batch_data)
+                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                elif self.dataset_name == 'Bach':
+                    batch_data = batch_data.to(self.device)
                     batch_data = batch_data.permute(1, 0, 2)
                     recon_batch_data = self.model(batch_data)
                     loss_recon = ((recon_batch_data - batch_data)**2).sum()
@@ -398,8 +414,3 @@ class LearningAlgorithm():
         plt.ylabel('loss', fontdict={'size':16})
         fig_file = os.path.join(save_dir, 'loss_KLD_{}.png'.format(tag))
         plt.savefig(fig_file)
-
-
-    
-
-        
