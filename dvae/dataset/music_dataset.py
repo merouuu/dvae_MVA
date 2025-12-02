@@ -163,6 +163,64 @@ class MusicDataset(Dataset):
         
         return x, y
 
+###########################################################
+# 4) RECONSTRUCTION (Tensor -> Midi)
+###########################################################
+def tensor_to_midi(tensor, output_path, fs=16, threshold=0.1):
+    """
+    Convertit un Piano Roll (Tensor ou Numpy) en fichier MIDI écoutable.
+    Version Corrigée avec Safety Clamp (0-127).
+    """
+    
+    # 1. Conversion Tensor -> Numpy
+    if isinstance(tensor, torch.Tensor):
+        piano_roll = tensor.detach().cpu().numpy()
+    else:
+        piano_roll = tensor
+
+    # 2. Denormaliser (0.0-1.0 -> 0-127)
+    # On clip d'abord entre 0 et 1 pour éviter les négatifs du Tanh ou les >1
+    piano_roll = np.clip(piano_roll, 0.0, 1.0) * 127.0
+    
+    # 3. Création de l'objet MIDI
+    pm = pretty_midi.PrettyMIDI()
+    piano = pretty_midi.Instrument(program=0) # 0 = Grand Piano
+    
+    # 4. Reconstruction des notes
+    seq_len, num_notes = piano_roll.shape
+    
+    for t in range(seq_len):
+        for p in range(num_notes):
+            velocity = piano_roll[t, p]
+            
+            if velocity > (threshold * 127):
+                # --- SAFETY CLAMP (La correction est ici) ---
+                # On force la vélocité à être un entier entre 0 et 127
+                safe_velocity = int(np.clip(velocity, 0, 127))
+                
+                # On calcule le pitch et on le sécurise aussi (juste au cas où)
+                pitch = p + 21 
+                safe_pitch = int(np.clip(pitch, 0, 127))
+                
+                start_time = t / fs
+                end_time = (t + 1) / fs
+                
+                # Création de la note avec les valeurs sécurisées
+                note = pretty_midi.Note(
+                    velocity=safe_velocity,
+                    pitch=safe_pitch,
+                    start=start_time,
+                    end=end_time
+                )
+                piano.notes.append(note)
+    
+    pm.instruments.append(piano)
+    
+    # 5. Sauvegarde
+    pm.write(output_path)
+    print(f"Fichier MIDI sauvegardé : {output_path}")
+
+
 # --- Zone de test ---
 if __name__ == "__main__":
     # Exemple d'utilisation pour créer le fichier dataset.npz
