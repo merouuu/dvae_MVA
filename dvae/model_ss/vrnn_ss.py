@@ -185,7 +185,7 @@ class VRNN_ss(nn.Module):
         dec_input = torch.cat((feature_zt, h_t), 2)
         dec_output = self.mlp_hz_x(dec_input)
         y_t = self.gen_out(dec_output)
-        return torch.sigmoid(y_t) # <--- AJOUTEZ CECI
+        return torch.sigmoid(y_t) # changement du modèle d'observation gaussian -> bernouilli
     
     def generation_z(self, h):
         prior_output = self.mlp_h_z(h)

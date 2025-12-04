@@ -236,7 +236,8 @@ class LearningAlgorithm_ss():
                     batch_data = batch_data.permute(1, 0, 2)
 
                     # BCE Loss for Music
-                    batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    #batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    batch_data = (batch_data > 0.1).float()
                     recon_batch_data = self.model(batch_data, use_pred)
                     #loss_recon = ((recon_batch_data - batch_data)**2).sum()
                     loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
@@ -259,7 +260,8 @@ class LearningAlgorithm_ss():
                 train_loss[epoch] += loss_tot.item() * bs
                 train_recon[epoch] += loss_recon.item() * bs
                 train_kl[epoch] += loss_kl.item() * bs
-                
+            
+            self.model.eval()
             # Validation
             for _, batch_data in enumerate(val_dataloader):
                 
@@ -276,15 +278,16 @@ class LearningAlgorithm_ss():
                     batch_data = batch_data.permute(1, 0, 2) / 1000
                     recon_batch_data = self.model(batch_data, use_pred)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
+
                 elif self.dataset_name == 'Bach':
                     batch_data = batch_data.permute(1, 0, 2)
-                    recon_batch_data = self.model(batch_data, use_pred)
-                    batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    #batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    batch_data = (batch_data > 0.1).float()
                     recon_batch_data = self.model(batch_data, use_pred)
                     #loss_recon = ((recon_batch_data - batch_data)**2).sum()
                     loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
 
-                    
+                self.model.train()
 
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)

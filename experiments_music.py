@@ -184,6 +184,44 @@ def plot_reconstruction(x, y):
     plt.tight_layout()
     plt.show()
 
+def continue_generation_vrnn_final(model, split, total_len):
+    device = model.device
+    batch = model.h_full[0].shape[1] 
+    
+    # Récupération des états cachés (Comme avant)
+    h_t = model.h_full[split-1].clone()
+    c_t = model.c_full[split-1].clone()
+    h_t_last = h_t[-1].unsqueeze(0)
+
+    gen_len = total_len - split
+    y_gen = torch.zeros(gen_len, batch, model.x_dim, device=device)
+
+    for t in range(gen_len):
+        # 1. Prior
+        mu_p, logvar_p = model.generation_z(h_t_last)
+        z_t = model.reparameterization(mu_p, logvar_p)
+
+        # 2. Decode
+        feat_z = model.feature_extractor_z(z_t)
+        
+        # Le modèle contient déjà la Sigmoid maintenant !
+        y_t_prob = model.generation_x(feat_z, h_t_last) 
+        
+        # Stockage (on garde la probabilité pour la visualisation)
+        y_gen[t] = y_t_prob
+
+        # 3. Recurrence avec HARD THRESHOLDING
+        # C'est CRUCIAL : On force une décision nette pour l'étape suivante
+        # pour éviter que le modèle ne retombe dans le "flou".
+        y_t_hard = (y_t_prob > 0.5).float()
+        
+        feat_x = model.feature_extractor_x(y_t_hard) 
+        
+        h_t, c_t = model.recurrence(feat_x, feat_z, h_t, c_t)
+        h_t_last = h_t[-1].unsqueeze(0)
+
+    return y_gen
+
 def plot_continuation(x, y_resynth, y_gen, split=300):
     """
     x         : original input (seq_len, 1, 1)
