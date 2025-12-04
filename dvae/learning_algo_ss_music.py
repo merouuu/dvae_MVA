@@ -17,12 +17,22 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from .utils import myconf, get_logger, loss_ISD, loss_KLD, loss_MPJPE
+from torch.nn import functional as F
 
-# IMPORTS MIS À JOUR
-from .dataset import h36m_dataset, speech_dataset, ecg_dataset
+# Imports for datasets (added music_dataset)
+from .dataset import h36m_dataset, speech_dataset, music_dataset
+# Imports for models (added VRNN_ss)
 from .model_ss import build_SRNN_ss,build_VRNN_ss
 
+
 class LearningAlgorithm_ss():
+
+    """
+    Basical class for model building, including:
+    - read common paramters for different models
+    - define data loader
+    - define loss function as a class member
+    """
 
     def __init__(self, params):
         # Load config parser
@@ -48,10 +58,10 @@ class LearningAlgorithm_ss():
         if self.model_name == 'SRNN': 
             self.model = build_SRNN_ss(cfg=self.cfg, device=self.device)
         elif self.model_name == 'VRNN':
-            # AJOUT DU SUPPORT VRNN AVEC SS
+            # Use the new VRNN with Schedule Sampling
             self.model = build_VRNN_ss(cfg=self.cfg, device=self.device)
         else:
-            print('Error: wrong model type for SS training')
+            print('Error: wrong model type for SS')
         
 
     def init_optimizer(self):
@@ -132,13 +142,12 @@ class LearningAlgorithm_ss():
         elif self.dataset_name == 'H36M':
             self.model.out_mean = True
             train_dataloader, val_dataloader, train_num, val_num = h36m_dataset.build_dataloader(self.cfg)
-        elif self.dataset_name == 'ECG':
-            # AJOUT DU CHARGEMENT ECG
+        elif self.dataset_name == 'Bach':
+            # Added Music Dataset support
             self.model.out_mean = True
-            train_dataloader, val_dataloader, train_num, val_num = ecg_dataset.build_dataloader(self.cfg)
+            train_dataloader, val_dataloader, train_num, val_num = music_dataset.build_music_dataloader(self.cfg)
         else:
             logger.error('Unknown datset')
-            raise NotImplementedError
             
         logger.info('Training samples: {}'.format(train_num))
         logger.info('Validation samples: {}'.format(val_num))
@@ -167,11 +176,6 @@ class LearningAlgorithm_ss():
             best_state_dict = self.model.state_dict()
             best_optim_dict = optimizer.state_dict()
             start_epoch = -1
-            if self.params['use_pretrain']:
-                state_dict_file = self.params['pretrain_dict']
-                self.model.load_state_dict(torch.load(state_dict_file, map_location=self.device))
-                best_state_dict = self.model.state_dict()
-                logger.info('Loading pre-trained model: {}'.format(state_dict_file))
         else:
             cp_file = os.path.join(save_dir, '{}_checkpoint.pt'.format(self.model_name))
             checkpoint = torch.load(cp_file)
@@ -192,10 +196,11 @@ class LearningAlgorithm_ss():
             best_state_dict = self.model.state_dict()
             best_optim_dict = optimizer.state_dict()
 
-        # Schedule sampling settings
+        # Schedule sampling
         ss_step = self.cfg.getint('Training', 'ss_step')
+        # use_pred is the Probability of using Prediction (0=TeacherForcing, 1=AutoRegression)
         use_pred = 1 if start_epoch > 9 * ss_step else (1 + start_epoch // ss_step) * 0.1
-
+        
         # Train with mini-batch SGD
         for epoch in range(start_epoch+1, epochs):
 
@@ -203,38 +208,39 @@ class LearningAlgorithm_ss():
             
             # Schedule Sampling update
             if epoch % ss_step == 0 and use_pred < 1:
-                use_pred = (1 + epoch // ss_step) * 0.1 # from 0.1 to 1
-                optimizer = self.init_optimizer()
+                use_pred = (1 + epoch // ss_step) * 0.1 # Increase prob of using prediction
+                optimizer = self.init_optimizer() # Reset optimizer is sometimes done in SS strategies
                 best_val_loss = np.inf
-                step = epoch // 50
-                logger.info('Schedule Sampling, step {}, prediction probability {:.1f}'.format(step, use_pred))
+                step = epoch // ss_step
+                logger.info('Schedule Sampling, step {}, prediction probability {:1f}'.format(step, use_pred))
 
             # Batch training
             for _, batch_data in enumerate(train_dataloader):
                 
-                # Pre-traitement des batchs selon le dataset
-                if self.dataset_name == 'ECG':
+                # Handling Bach Unpacking
+                if self.dataset_name == 'Bach':
                     batch_data, _ = batch_data 
 
                 batch_data = batch_data.to(self.device)
 
-                # CALCUL DE LOSS
                 if self.dataset_name == 'WSJ0':
                     batch_data = batch_data.permute(2, 0, 1)
-                    recon_batch_data = torch.exp(self.model(batch_data, use_pred)) 
+                    recon_batch_data = torch.exp(self.model(batch_data, use_pred))
                     loss_recon = loss_ISD(batch_data, recon_batch_data)
-                    
                 elif self.dataset_name == 'H36M':
                     batch_data = batch_data.permute(1, 0, 2) / 1000 
                     recon_batch_data = self.model(batch_data, use_pred)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
-                    
-                elif self.dataset_name == 'ECG':
-                    # Logique ECG : Permute (Seq, Batch, Dim) et MSE Loss
+                elif self.dataset_name == 'Bach':
+                    # (Batch, Seq, Dim) -> (Seq, Batch, Dim)
                     batch_data = batch_data.permute(1, 0, 2)
+
+                    # BCE Loss for Music
+                    #batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    batch_data = (batch_data > 0.1).float()
                     recon_batch_data = self.model(batch_data, use_pred)
-                    # MSE Loss pour ECG
-                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                    #loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                    loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
 
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)
@@ -246,7 +252,7 @@ class LearningAlgorithm_ss():
                 optimizer.zero_grad()
                 loss_tot.backward()
                 
-                # Ajout d'un clip grad par sécurité (souvent utile en RNN)
+                # Gradient Clipping (Essential for RNN SS)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10)
                 
                 optimizer.step()
@@ -254,27 +260,34 @@ class LearningAlgorithm_ss():
                 train_loss[epoch] += loss_tot.item() * bs
                 train_recon[epoch] += loss_recon.item() * bs
                 train_kl[epoch] += loss_kl.item() * bs
-                
+            
+            self.model.eval()
             # Validation
             for _, batch_data in enumerate(val_dataloader):
                 
-                if self.dataset_name == 'ECG':
+                if self.dataset_name == 'Bach':
                     batch_data, _ = batch_data
 
                 batch_data = batch_data.to(self.device)
                 
                 if self.dataset_name == 'WSJ0':
                     batch_data = batch_data.permute(2, 0, 1)
-                    recon_batch_data = torch.exp(self.model(batch_data, use_pred)) 
+                    recon_batch_data = torch.exp(self.model(batch_data, use_pred))
                     loss_recon = loss_ISD(batch_data, recon_batch_data)
                 elif self.dataset_name == 'H36M':
-                    batch_data = batch_data.permute(1, 0, 2) / 1000 
+                    batch_data = batch_data.permute(1, 0, 2) / 1000
                     recon_batch_data = self.model(batch_data, use_pred)
                     loss_recon = loss_MPJPE(batch_data*1000, recon_batch_data*1000)
-                elif self.dataset_name == 'ECG':
+
+                elif self.dataset_name == 'Bach':
                     batch_data = batch_data.permute(1, 0, 2)
+                    #batch_data = torch.clamp(batch_data, 0.0, 1.0)
+                    batch_data = (batch_data > 0.1).float()
                     recon_batch_data = self.model(batch_data, use_pred)
-                    loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                    #loss_recon = ((recon_batch_data - batch_data)**2).sum()
+                    loss_recon = F.binary_cross_entropy(recon_batch_data, batch_data, reduction='sum')
+
+                self.model.train()
 
                 seq_len, bs, _ = self.model.z_mean.shape
                 loss_recon = loss_recon / (seq_len * bs)
@@ -296,7 +309,7 @@ class LearningAlgorithm_ss():
             val_recon[epoch] = val_recon[epoch] / val_num 
             val_kl[epoch] = val_kl[epoch] / val_num
             
-            # Early stop patiance (valid only after prob=1)
+            # Early stop patience
             if val_loss[epoch] < best_val_loss or use_pred < 1:
                 best_val_loss = val_loss[epoch]
                 cpt_patience = 0
@@ -312,7 +325,7 @@ class LearningAlgorithm_ss():
             logger.info('Epoch: {} training time {:.2f}m'.format(epoch, interval))
             logger.info('Train => tot: {:.2f} recon {:.2f} KL {:.2f} Val => tot: {:.2f} recon {:.2f} KL {:.2f}'.format(train_loss[epoch], train_recon[epoch], train_kl[epoch], val_loss[epoch], val_recon[epoch], val_kl[epoch]))
 
-            # Stop traning if early-stop triggers
+            # Stop traning if early-stop triggers, only active after fully using prediction
             if cpt_patience == early_stop_patience and use_pred == 1:
                 logger.info('Early stop patience achieved')
                 break
@@ -333,12 +346,13 @@ class LearningAlgorithm_ss():
                             'optim_state_dict': best_optim_dict,
                             'loss_log': loss_log
                         }, save_file)
+                logger.info('Epoch: {} ===> checkpoint stored with current best epoch: {}'.format(epoch, cur_best_epoch))
         
-        # Save final weights
+        # Save the final weights
         save_file = os.path.join(save_dir, self.model_name + '_final_epoch' + str(cur_best_epoch) + '.pt')
         torch.save(best_state_dict, save_file)
         
-        # Save the loss figures (Code identique pour l'affichage)
+        # Save loss pickle and plots
         train_loss = train_loss[:epoch+1]
         val_loss = val_loss[:epoch+1]
         train_recon = train_recon[:epoch+1]

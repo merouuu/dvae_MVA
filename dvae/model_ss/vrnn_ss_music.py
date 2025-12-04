@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Modifié pour supporter le Schedule Sampling (SS)
+VRNN with Schedule Sampling
+Adapted for dvae-speech framework
 """
 
 from torch import nn
 import torch
-import random
 from collections import OrderedDict
 
 def build_VRNN_ss(cfg, device='cpu'):
@@ -36,9 +36,11 @@ def build_VRNN_ss(cfg, device='cpu'):
                  dense_h_z=dense_h_z,
                  dim_RNN=dim_RNN, num_RNN=num_RNN,
                  dropout_p= dropout_p, beta=beta, device=device).to(device)
+
     return model
 
 class VRNN_ss(nn.Module):
+
     def __init__(self, x_dim, z_dim=16, activation='tanh',
                  dense_x=[128], dense_z=[128],
                  dense_hx_z=[128], dense_hz_x=[128], dense_h_z=[128],
@@ -59,18 +61,21 @@ class VRNN_ss(nn.Module):
             raise SystemExit('Wrong activation type!')
         self.device = device
         
-        # Architecture parameters
+        # Output Mean/Logvar config (Depends on dataset, handled in training script)
+        self.out_mean = True 
+
+        ### Feature extractors
         self.dense_x = dense_x
         self.dense_z = dense_z
+        ### Dense layers
         self.dense_hx_z = dense_hx_z
         self.dense_hz_x = dense_hz_x
         self.dense_h_z = dense_h_z
+        ### RNN
         self.dim_RNN = dim_RNN
         self.num_RNN = num_RNN
+        ### Beta-loss
         self.beta = beta
-        
-        # Pour le learning algo ss
-        self.out_mean = True 
 
         self.build()
 
@@ -131,7 +136,7 @@ class VRNN_ss(nn.Module):
         self.inf_mean = nn.Linear(dim_hx_z, self.z_dim)
         self.inf_logvar = nn.Linear(dim_hx_z, self.z_dim)
         
-        # 2. h_t to z_t (Generation z / Prior)
+        # 2. h_t to z_t (Generation z)
         dic_layers = OrderedDict()
         if len(self.dense_h_z) == 0:
             dim_h_z = self.dim_RNN
@@ -180,8 +185,8 @@ class VRNN_ss(nn.Module):
         dec_input = torch.cat((feature_zt, h_t), 2)
         dec_output = self.mlp_hz_x(dec_input)
         y_t = self.gen_out(dec_output)
-        return y_t
-        
+        return torch.sigmoid(y_t) # changement du modèle d'observation gaussian -> bernouilli
+    
     def generation_z(self, h):
         prior_output = self.mlp_h_z(h)
         mean_prior = self.prior_mean(prior_output)
@@ -201,73 +206,103 @@ class VRNN_ss(nn.Module):
         return h_tp1, c_tp1
 
     def forward(self, x, use_pred=0.0):
-        # input:  (seq_len, batch_size, x_dim)
+        """
+        x: Ground Truth (Seq_Len, Batch, Dim)
+        use_pred: Float [0, 1]. Probability of using predicted output for recurrence.
+                  0.0 = Teacher Forcing (Always use x)
+                  1.0 = Autoregression (Always use prediction)
+        """
+
+        # need input:  (seq_len, batch_size, x_dim)
         seq_len, batch_size, _ = x.shape
 
-        # create variable holder
+        # create variable holder and send to GPU if needed
         self.z_mean = torch.zeros((seq_len, batch_size, self.z_dim)).to(self.device)
         self.z_logvar = torch.zeros((seq_len, batch_size, self.z_dim)).to(self.device)
         y = torch.zeros((seq_len, batch_size, self.y_dim)).to(self.device)
-        self.z = torch.zeros((seq_len, batch_size, self.z_dim)).to(self.device)
-
+        
         # storage of hidden states
         self.h = torch.zeros((seq_len, batch_size, self.dim_RNN)).to(self.device)
-        # Initialization
+        self.h_full = torch.zeros((seq_len, self.num_RNN, batch_size, self.dim_RNN), device=self.device)
+        self.c_full = torch.zeros((seq_len, self.num_RNN, batch_size, self.dim_RNN), device=self.device)
+
         h_t = torch.zeros(self.num_RNN, batch_size, self.dim_RNN).to(self.device)
         c_t = torch.zeros(self.num_RNN, batch_size, self.dim_RNN).to(self.device)
-        
-        # Variable pour stocker la sortie générée précédente
-        prev_y = torch.zeros((1, batch_size, self.x_dim)).to(self.device) 
 
-        # Main loop with Schedule Sampling logic
+        # Pre-compute features for Ground Truth (needed for Inference)
+        # We compute this once for efficiency
+        feature_x_gt_all = self.feature_extractor_x(x)
+        
+        # Buffer for previous prediction
+        prev_y = torch.zeros(1, batch_size, self.x_dim).to(self.device)
+
+        # main part
         for t in range(seq_len):
             
-            # --- Schedule Sampling Logic ---
-            # Si t=0, on utilise toujours x[0] (ground truth)
-            # Sinon, on choisit entre x[t] et prev_y (le y généré à t-1)
+            # --- 1. DETERMINE RECURRENCE INPUT ---
+            # At t=0, we always use GT (or zero/start token implicit in GT)
             if t == 0:
-                input_t = x[t,:,:].unsqueeze(0)
+                feature_xt_rec = feature_x_gt_all[t,:,:].unsqueeze(0)
             else:
-                # Tirage aléatoire : si coin < use_pred, on utilise la prédiction
-                if random.random() < use_pred:
-                    input_t = prev_y.detach() # Detach pour éviter de backprop trop loin si nécessaire, ou garder pour BPTT
+                # Schedule Sampling Logic
+                if self.training and torch.rand(1).item() < use_pred:
+                    # Use previous prediction
+                    
+                    # --- LA CORRECTION EST ICI ---
+                    # On ne réinjecte pas 'prev_y' (qui contient des floats comme 0.73)
+                    # On réinjecte une version binarisée (0.0 ou 1.0) simulée.
+                    # Cela stabilise énormément le RNN car il reste dans son domaine connu.
+                    
+                    inp = (prev_y > 0.5).float() # Hard Thresholding
+                    
+                    feature_xt_rec = self.feature_extractor_x(inp)
                 else:
-                    input_t = x[t,:,:].unsqueeze(0)
+                    # Use Ground Truth
+                    feature_xt_rec = feature_x_gt_all[t,:,:].unsqueeze(0)
 
-            # Feature extraction sur l'entrée choisie
-            feature_xt = self.feature_extractor_x(input_t)
+            # --- 2. INFERENCE (Always uses GT) ---
+            # The encoder must see the current TRUE x to map to the correct z
+            feature_xt_gt = feature_x_gt_all[t,:,:].unsqueeze(0)
             
-            # Inference (toujours besoin du hidden state précédent)
             h_t_last = h_t.view(self.num_RNN, 1, batch_size, self.dim_RNN)[-1,:,:,:]
-            mean_zt, logvar_zt = self.inference(feature_xt, h_t_last)
+            
+            mean_zt, logvar_zt = self.inference(feature_xt_gt, h_t_last)
             z_t = self.reparameterization(mean_zt, logvar_zt)
             
             feature_zt = self.feature_extractor_z(z_t)
             
-            # Generation x
+            # --- 3. GENERATION ---
             y_t = self.generation_x(feature_zt, h_t_last)
-            prev_y = y_t # Stockage pour la prochaine itération
             
-            # Storage
+            # Save output for next step SS
+            prev_y = y_t.detach() # Detach to stop gradient flowing through the sampling decision infinitely
+
+            # --- 4. STORAGE ---
             self.z_mean[t,:,:] = mean_zt
             self.z_logvar[t,:,:] = logvar_zt
-            self.z[t,:,:] = torch.squeeze(z_t)
-            y[t,:,:] = y_t 
+            y[t,:,:] = y_t
             self.h[t,:,:] = torch.squeeze(h_t_last)
-            
-            # Recurrence
-            h_t, c_t = self.recurrence(feature_xt, feature_zt, h_t, c_t)
+            self.h_full[t] = h_t
+            self.c_full[t] = c_t
 
-        # Calcul du prior final (si besoin pour KL)
-        self.z_mean_p, self.z_logvar_p = self.generation_z(self.h)
+            # --- 5. RECURRENCE ---
+            rnn_input_feat = feature_xt_rec
+            
+            if self.training and torch.rand(1).item() < 0.3: # dropout=0.3
+                # On remplace l'input du RNN par des zéros (dropout total de la frame)
+                rnn_input_feat = torch.zeros_like(rnn_input_feat)
+
+            # Update h_t using the selected input (GT or Pred)
+            h_t, c_t = self.recurrence(rnn_input_feat, feature_zt, h_t, c_t)
+
+        self.z_mean_p, self.z_logvar_p  = self.generation_z(self.h)
         
         return y
 
     def get_info(self):
         info = []
+        info.append("VRNN with Schedule Sampling")
         info.append("----- Feature extractor -----")
-        for layer in self.feature_extractor_x: info.append(str(layer))
-        for layer in self.feature_extractor_z: info.append(str(layer))
-        info.append("----- VRNN Schedule Sampling Mode -----")
-        info.append(str(self.rnn))
+        for layer in self.feature_extractor_x:
+            info.append(str(layer))
         return info
