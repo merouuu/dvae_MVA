@@ -286,8 +286,14 @@ class VRNN_ss(nn.Module):
             self.c_full[t] = c_t
 
             # --- 5. RECURRENCE ---
+            rnn_input_feat = feature_xt_rec
+            
+            if self.training and torch.rand(1).item() < 0.3: # dropout=0.3
+                # On remplace l'input du RNN par des zéros (dropout total de la frame)
+                rnn_input_feat = torch.zeros_like(rnn_input_feat)
+
             # Update h_t using the selected input (GT or Pred)
-            h_t, c_t = self.recurrence(feature_xt_rec, feature_zt, h_t, c_t)
+            h_t, c_t = self.recurrence(rnn_input_feat, feature_zt, h_t, c_t)
 
         self.z_mean_p, self.z_logvar_p  = self.generation_z(self.h)
         
