@@ -186,9 +186,10 @@ def plot_reconstruction(x, y):
 
 def continue_generation_vrnn_final(model, split, total_len):
     device = model.device
+    # On garde la détection dynamique du batch (plus robuste que batch=1)
     batch = model.h_full[0].shape[1] 
     
-    # Récupération des états cachés (Comme avant)
+    # --- Initialisation (Récupération des états cachés) ---
     h_t = model.h_full[split-1].clone()
     c_t = model.c_full[split-1].clone()
     h_t_last = h_t[-1].unsqueeze(0)
@@ -204,19 +205,21 @@ def continue_generation_vrnn_final(model, split, total_len):
         # 2. Decode
         feat_z = model.feature_extractor_z(z_t)
         
-        # Le modèle contient déjà la Sigmoid maintenant !
-        y_t_prob = model.generation_x(feat_z, h_t_last) 
+        # Génération de la sortie (Log-Power Spectrogram)
+        y_t = model.generation_x(feat_z, h_t_last) 
         
-        # Stockage (on garde la probabilité pour la visualisation)
-        y_gen[t] = y_t_prob
+        # Stockage (on garde le Log-Power pour la visualisation/audio)
+        y_gen[t] = y_t
 
-        # 3. Recurrence avec HARD THRESHOLDING
-        # C'est CRUCIAL : On force une décision nette pour l'étape suivante
-        # pour éviter que le modèle ne retombe dans le "flou".
-        y_t_hard = (y_t_prob > 0.5).float()
+        # 3. Recurrence avec LOG -> LINEAR
+        # ADAPTATION ICI : Au lieu du seuillage binaire (>0.5), 
+        # on applique exp() pour repasser en échelle linéaire 
+        # car feature_extractor_x attend du Linear Power.
+        y_t_linear = torch.exp(y_t)
         
-        feat_x = model.feature_extractor_x(y_t_hard) 
+        feat_x = model.feature_extractor_x(y_t_linear) 
         
+        # Mise à jour des états RNN
         h_t, c_t = model.recurrence(feat_x, feat_z, h_t, c_t)
         h_t_last = h_t[-1].unsqueeze(0)
 

@@ -101,12 +101,14 @@ def plot_continuation(x, y_resynth, y_gen, split=300):
 
     # Vertical red line
     plt.axvline(split, color='red', linestyle='--', linewidth=2,
-                label=f"Switch to free generation @ {split}")
+                label=f"Switch to free generation (t={split})")
 
-    plt.title("VRNN Continuation Generation")
+    #plt.title("VRNN Continuation Generation")
     plt.xlabel("Time step")
     plt.ylabel("Amplitude")
-    plt.legend()
+    #plt.legend()
+    #plt.xticks([])
+    #plt.yticks([])
     plt.tight_layout()
     plt.show()
 
@@ -175,7 +177,7 @@ def plot_latent_heatmap(z, t_start=0, t_end=300):
     plt.xlabel("Time")
     plt.ylabel("Latent dimension")
 
-    plt.title(f"VRNN latent trajectories  (t={t_start}→{t_end})")
+    plt.title(f"Evolution of the mean of $q_\\phi(z_t \\mid x_t, h_t)$")
     plt.tight_layout()
     plt.show()
 
@@ -390,64 +392,50 @@ def plot_mean_hidden_states(model, X, device, max_samples=64):
     plt.colorbar(label="Mean z_mu value")
     plt.xlabel("Time")
     plt.ylabel("Latent dimension")
-    plt.title(f"Mean latent μ(t) over {N} samples")
+    plt.title(f"Evolution of $\\mu_\\phi(x_t, h_t)$")
     plt.tight_layout()
     plt.show()
 
     return H_mean, Z_mean
 
-
 def continue_generation_vrnn(model, split, total_len):
-
     device = model.device
     batch = 1
 
-    # ================================================================
-    # 1. Récupérer les VRAIS états à t = split-1
-    # ================================================================
+    # ... (Initialisation inchangée) ...
+    h_t = model.h_full[split-1].clone()
+    c_t = model.c_full[split-1].clone()
+    h_t_last = h_t[-1].unsqueeze(0)
     
-    # hidden states (all layers)
-    h_t = model.h_full[split-1].clone()  # shape (num_layers, batch, dim_RNN)
-    c_t = model.c_full[split-1].clone()  # shape (num_layers, batch, dim_RNN)
-
-    # last-layer hidden state = used by prior + decoder
-    h_t_last = h_t[-1].unsqueeze(0)      # shape (1, batch, dim_RNN)
-
-    # On part d'un x_t initial = output reconstruit au split-1
-    # comme dans forward() où y[t] = model.generation_x(...)
-    y_prev = model.forward_output[split-1].unsqueeze(0) \
-             if hasattr(model, "forward_output") else None
-
-    # Mais y_prev N'EST PAS utilisé directement : le VRNN génère x_t from scratch
-    # Ce var est inutile pour VRNN (contrairement à un ARNN)
-    
-    # Préparation du buffer de sortie
     gen_len = total_len - split
     y_gen = torch.zeros(gen_len, batch, model.x_dim, device=device)
 
-    # ================================================================
-    # 2. GÉNÉRATION LIBRE EXACTE
-    # ================================================================
     for t in range(gen_len):
-
-        # ---- 2.1 Prior : p(z_t | h_t_last)
+        # 2.1 Prior
         mu_p, logvar_p = model.generation_z(h_t_last)
-        z_t = model.reparameterization(mu_p, logvar_p)  # (1, batch, z_dim)
+        z_t = model.reparameterization(mu_p, logvar_p)
 
-        # ---- 2.2 Decode : x_t = p(x | z_t, h_t_last)
+        # 2.2 Decode (Sortie Log-Power)
         feat_z = model.feature_extractor_z(z_t)
-        y_t = model.generation_x(feat_z, h_t_last)       # (1, batch, x_dim)
-
+        y_t = model.generation_x(feat_z, h_t_last) 
+        
         y_gen[t] = y_t
 
-        # ---- 2.3 Mettre à jour RNN comme dans forward()
-        feat_x = model.feature_extractor_x(y_t)
+        # 2.3 Update RNN
+        # === CORRECTION ICI ===
+        # L'entrée du réseau (feature_extractor_x) attend du Linear Power (comme dans wav_2_tensor).
+        # La sortie y_t est du Log Power. On applique exp() pour "fermer la boucle".
+
+        #y_t_linear = torch.exp(y_t) 
+        
+        feat_x = model.feature_extractor_x(y_t)  
         h_t, c_t = model.recurrence(feat_x, feat_z, h_t, c_t)
 
-        # ---- 2.4 Actualiser h_t_last = dernier layer
+        # 2.4 Update h_t_last
         h_t_last = h_t[-1].unsqueeze(0)
 
     return y_gen
+
 
 
 
